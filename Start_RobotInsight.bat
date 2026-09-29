@@ -53,10 +53,10 @@ timeout /t 1 /nobreak >nul
 goto WaitForOllama
 
 :OllamaReady
-ollama list | findstr /i /c:"mistral:latest" >nul
+ollama list | findstr /i /c:"gemma3:1b" >nul
 if errorlevel 1 (
-    echo Downloading the Mistral language model. This is about 4.4 GB...
-    ollama pull mistral:latest
+    echo Downloading the Gemma 3 1B language model...
+    ollama pull gemma3:1b
     if errorlevel 1 goto SetupFailed
 )
 

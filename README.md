@@ -21,7 +21,7 @@ RobotInsight is a Windows voice-controlled assistant with a wake word, speech re
 - An NVIDIA GPU can improve local model speed, but is optional
 - A webcam for camera questions
 
-The Mistral model alone is about 4.4 GB. RobotInsight also downloads its vision model, speech-recognition assets, and a Piper voice on first setup. The app can run without a webcam, but its vision feature needs one.
+The default Gemma 3 1B language model is about 815 MB. RobotInsight also downloads its vision model, speech-recognition assets, and a Piper voice on first setup. The app can run without a webcam, but its vision feature needs one.
 
 ## First-time setup
 
@@ -64,7 +64,7 @@ More test phrases are in [TEST_PHRASES.md](TEST_PHRASES.md).
 - **Ollama cannot connect:** open Ollama from the Start menu and try again.
 - **Microphone errors:** choose a working Windows default input device and check microphone privacy permissions.
 - **Dependency setup needs to run again:** delete `.setup_complete` and launch the `.bat` file again.
-- **The model is slow:** Ollama can use the CPU, but a faster processor or supported GPU improves response time. The app currently uses the `mistral:latest` model.
+- **The model is slow:** Ollama can use the CPU, but a faster processor or supported GPU improves response time. The app uses the smaller `gemma3:1b` model by default.
 
 ## Privacy and network use
 

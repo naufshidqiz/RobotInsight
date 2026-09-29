@@ -22,7 +22,7 @@ except ImportError as e:
     sys.exit(1)
 
 # --- Memory Management ---
-LLM_MODEL = "mistral:latest"
+LLM_MODEL = "gemma3:1b"
 LLM_OPTIONS = {
     "temperature": 0.4,
     "num_ctx": 4096,
