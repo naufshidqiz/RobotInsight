@@ -1,0 +1,13 @@
+ddgs
+numpy
+ollama
+openai-whisper
+openwakeword
+opencv-python
+pillow
+piper-tts
+scipy
+silero-vad
+sounddevice
+soundfile
+torch
