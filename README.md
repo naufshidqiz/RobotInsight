@@ -97,7 +97,7 @@ The suite covers device preferences, the authenticated local UI bridge, speech e
 
 ## Microphone and camera
 
-Open **Devices** in the top bar, choose a detected microphone and camera, and click **Apply devices**. Your microphone choice is shared by wake-word detection, voice questions, and microphone buffer clearing. The camera choice is used for camera questions. Changes apply to the next request; the panel waits for any active recording or response to finish before applying them.
+Open **Devices** in the top bar, choose a detected microphone and camera, and click **Apply devices**. Your microphone choice is shared by wake-word detection and voice questions. The camera choice is used for camera questions. Changes apply to the next request; the panel waits for any active recording or response to finish before applying them.
 
 Use **Refresh** after connecting devices. Preferences are stored locally in `device_settings.json`, which is excluded from Git. If a saved device is disconnected, the panel shows it as unavailable so you can choose another. Use the default options to follow the Windows default microphone and OpenCV's default camera. Detection does not open the camera or record microphone audio. Allow microphone and camera access for desktop apps in Windows Privacy settings.
 
@@ -135,3 +135,17 @@ You can also say “Look on the internet” or “Cari di internet” without a 
 Speech recognition, language generation, vision analysis, and text-to-speech run on the PC. The assistant sends web-search queries to its search provider when web lookup is needed, and requested cities to Open-Meteo for weather. The first run downloads Python packages and model files. No API key is required.
 
 Downloaded models, voice samples, conversation memory, and device preferences are excluded from Git. The repository includes the UI assets, application code, tests, and setup scripts; a fresh clone downloads its models through the launcher.
+
+## Project layout
+
+| Path | Purpose |
+| --- | --- |
+| `main.py` | Shared voice/text request loop, conversation, and tool routing. |
+| `modules/` | Speech engines, wake word, devices, local UI server, weather, and search. |
+| `modules/hey_in_site.onnx` | Custom wake-word model used by the app. |
+| `ui/` | Browser interface and animated robot asset. |
+| `tests/` | Automated regression tests. |
+| `Start_RobotInsight.bat` | Windows setup and launch entry point. |
+| `models/` | Downloaded speech resources, created locally by setup. |
+
+The interface draws robot expressions in the browser; the legacy JPG animation folders and their diagnostic scripts are no longer needed. Speech setup is handled by `python -m modules.setup_speech`; use `--wake-only` to download only the wake-word feature resources.

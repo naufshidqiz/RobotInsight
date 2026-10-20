@@ -7,7 +7,5 @@ device_settings.tmp
 models/
 output/
 .setup_complete
-modules/en_GB-alan-medium.onnx
-modules/en_GB-alan-medium.onnx.json
 modules/en_US-hfc_female-medium.onnx
 modules/en_US-hfc_female-medium.onnx.json

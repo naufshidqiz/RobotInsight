@@ -11,5 +11,4 @@ piper-tts
 scipy
 silero-vad
 sounddevice
-soundfile
 torch

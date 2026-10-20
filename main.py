@@ -187,11 +187,6 @@ KNOWLEDGE_QUESTION = re.compile(
     r"\b(?:explain|define|tell me about|who was|what was)\b",
     re.IGNORECASE,
 )
-CASUAL_QUESTION = re.compile(
-    r"^(?:how are you|how do you feel|are you okay|can you hear me|do you like|"
-    r"would you rather|what can you do|are you there)\b",
-    re.IGNORECASE,
-)
 CONTEXTUAL_FOLLOWUP = re.compile(
     r"^(?:why(?: is (?:that|it))?|how so|what do you mean(?: by (?:that|it|this))?|say more|"
     r"explain (?:more|further)|more(?: details)?|go on|continue|elaborate|"
@@ -202,11 +197,6 @@ CONTEXTUAL_FOLLOWUP = re.compile(
     re.IGNORECASE,
 )
 
-
-def needs_knowledge_lookup(text):
-    """Use the web to ground factual questions rather than asking a small local model to guess."""
-    cleaned = text.strip()
-    return bool(KNOWLEDGE_QUESTION.search(cleaned) and not CASUAL_QUESTION.search(cleaned))
 
 def detect_intent(text):
     t = text.replace("’", "'").lower().strip()
@@ -281,13 +271,6 @@ def execute_action(action_data):
         return "IMAGE_CAPTURE_TRIGGERED"
 
     return None  # Unknown action — fall through to plain text
-
-def flush_mic(seconds=1.5):
-    """Drain the microphone buffer so leftover audio doesn't trigger wake word."""
-    import sounddevice as sd
-    device, sample_rate = devices.microphone_settings()
-    sd.rec(int(seconds * sample_rate), device=device, samplerate=sample_rate, channels=1, dtype="float32")
-    sd.wait()
 
 def handle_prompt(user):
     """Shared text/voice request path; runs on the assistant worker, never in the UI."""
