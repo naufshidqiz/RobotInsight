@@ -29,9 +29,27 @@ if not exist ".setup_complete" (
     echo ready>.setup_complete
 )
 
-if not exist "modules\en_GB-alan-medium.onnx" (
-    echo Downloading the Piper voice model...
-    "%PYTHON%" -m piper.download_voices en_GB-alan-medium --data-dir modules
+"%PYTHON%" -c "import cv2_enumerate_cameras" >nul 2>nul
+if errorlevel 1 (
+    echo Installing camera device detection...
+    "%PYTHON%" -m pip install "cv2-enumerate-cameras>=1.2.2"
+    if errorlevel 1 goto SetupFailed
+)
+
+"%PYTHON%" -c "import faster_whisper, kokoro_onnx" >nul 2>nul
+if errorlevel 1 (
+    echo Upgrading local speech engines...
+    "%PYTHON%" -m pip install -r requirements.txt
+    if errorlevel 1 goto SetupFailed
+)
+
+echo Checking offline speech and wake-word models...
+"%PYTHON%" -m modules.setup_speech
+if errorlevel 1 goto SetupFailed
+
+if not exist "modules\en_US-hfc_female-medium.onnx" (
+    echo Downloading the female fallback voice...
+    "%PYTHON%" -m piper.download_voices en_US-hfc_female-medium --data-dir modules
     if errorlevel 1 goto SetupFailed
 )
 
@@ -53,10 +71,11 @@ timeout /t 1 /nobreak >nul
 goto WaitForOllama
 
 :OllamaReady
-ollama list | findstr /i /c:"gemma3:1b" >nul
+if not defined ROBOT_LLM_MODEL set "ROBOT_LLM_MODEL=qwen3:4b-instruct-2507-q4_K_M"
+ollama list | findstr /i /c:"%ROBOT_LLM_MODEL%" >nul
 if errorlevel 1 (
-    echo Downloading the Gemma 3 1B language model...
-    ollama pull gemma3:1b
+    echo Downloading the compact chat model %ROBOT_LLM_MODEL%...
+    ollama pull "%ROBOT_LLM_MODEL%"
     if errorlevel 1 goto SetupFailed
 )
 
@@ -68,8 +87,8 @@ if errorlevel 1 (
 )
 
 echo.
-echo Starting RobotInsight. Say "Hey In Site" to wake it.
-echo Press Escape to leave fullscreen, or Ctrl+C in this window to stop.
+echo Starting RobotInsight. Type a message or say "Hey In Site" to wake it.
+echo Use the fullscreen button to expand. Press Ctrl+C here to stop.
 echo.
 "%PYTHON%" main.py
 echo.
@@ -80,7 +99,7 @@ exit /b 0
 :MissingPython
 echo Python 3.11 x64 was not found.
 echo Install it from https://www.python.org/downloads/release/python-3119/
-echo During setup, enable the Python Launcher and Tcl/Tk options.
+echo During setup, enable the Python Launcher option.
 start "" "https://www.python.org/downloads/release/python-3119/"
 pause
 exit /b 1

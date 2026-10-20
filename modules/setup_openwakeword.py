@@ -1,16 +1,12 @@
-from openwakeword.utils import download_models
-import os
+"""Compatibility entry point for the project-local wake-word resource repair."""
+import sys
+from pathlib import Path
 
-print("Downloading openWakeWord resources...")
-try:
-    download_models()
-    model_dir = os.path.join(os.path.expanduser("~"), ".openwakeword", "models")
-    print(f"Done. Models saved to {model_dir}")
-    
-    # List downloaded models
-    if os.path.exists(model_dir):
-        models = [f for f in os.listdir(model_dir) if f.endswith(".onnx")]
-        print(f"Available models: {models}")
-except Exception as e:
-    print(f"Error downloading models: {e}")
-    print("You may need to download models manually from GitHub")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from modules.setup_speech import setup_wakeword, WAKE_DIR
+from modules.wakeword import WakeWordDetector
+
+if __name__ == "__main__":
+    setup_wakeword()
+    WakeWordDetector()  # Validate all ONNX sessions without opening a microphone.
+    print(f"Wake-word resources validated in {WAKE_DIR}")

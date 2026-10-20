@@ -2,6 +2,10 @@
 __pycache__/
 *.py[cod]
 memory.json
+device_settings.json
+device_settings.tmp
+models/
+output/
 .setup_complete
 modules/en_GB-alan-medium.onnx
 modules/en_GB-alan-medium.onnx.json

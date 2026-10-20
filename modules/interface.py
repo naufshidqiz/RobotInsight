@@ -1,297 +1,259 @@
-"""Canvas-drawn RobotInsight face with lightweight state-driven animation."""
-
-import math
+"""Loopback desktop UI. Preview: python -m modules.interface --preview."""
+import base64
+import io
+import json
+import os
+from pathlib import Path
+import queue
+import secrets
+import subprocess
 import threading
 import time
-import textwrap
-import tkinter as tk
+import webbrowser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit
+from modules import devices
 
-from PIL import Image, ImageTk
-
-
-_current_state = "idle"
-_state_lock = threading.Lock()
-_state_started = time.monotonic()
-_window_ready = threading.Event()
-
+_lock = threading.Lock()
+_current_state = "warmup"
+_conversation = []
 _capture_image = None
-_capture_lock = threading.Lock()
-_capture_changed = threading.Event()
-_conversation = {"question": "", "answer": ""}
-_conversation_lock = threading.Lock()
-
-BACKGROUND = "#f7f4e9"
-INK = "#282d30"
-TEAL = "#62bdb3"
-TEAL_DARK = "#398e89"
-GOLD = "#f1c76a"
-
-
-def show_capture(pil_image):
-    """Show a camera image over the character while vision runs."""
-    global _capture_image
-    with _capture_lock:
-        _capture_image = pil_image.copy()
-        _capture_changed.set()
+_voice_enabled = True
+_pending = queue.Queue(maxsize=1)
+_shutdown = threading.Event()
+_server = None
+_token = secrets.token_urlsafe(32)
+_preview = False
+_revision = 0
+_voice_status = {"wakeword": "starting", "message": "Starting voice input", "level": 0.0, "score": 0.0}
+WEB_ROOT = Path(__file__).resolve().parent.parent / "ui"
+STATES = {"idle", "warmup", "listening", "transcribing", "thinking", "searching", "capturing", "speaking", "error"}
 
 
-def clear_capture():
-    """Hide the camera image overlay."""
-    global _capture_image
-    with _capture_lock:
-        _capture_image = None
-        _capture_changed.set()
+def set_state(state):
+    global _current_state
+    if state not in STATES:
+        raise ValueError(f"Unknown UI state: {state}")
+    with _lock:
+        _current_state = state
 
 
-def set_state(state: str):
-    global _current_state, _state_started
-    with _state_lock:
-        if state != _current_state:
-            _current_state = state
-            _state_started = time.monotonic()
-
-
-def get_state() -> str:
-    with _state_lock:
+def get_state():
+    with _lock:
         return _current_state
 
 
 def set_conversation(question=None, answer=None):
-    """Update the two side-panel captions from the assistant worker thread."""
-    with _conversation_lock:
+    global _revision
+    with _lock:
         if question is not None:
-            _conversation["question"] = question
-        if answer is not None:
-            _conversation["answer"] = answer
+            _conversation.append({"role": "user", "content": str(question)})
+        if answer:
+            _conversation.append({"role": "assistant", "content": str(answer)})
+        del _conversation[:-100]
+        _revision += 1
 
 
-def _rounded_rectangle(canvas, x1, y1, x2, y2, radius, *, fill, outline, width, sx, sy):
-    """Draw a smooth rounded rectangle in the character's 1000x700 coordinate space."""
-    points = []
-    corners = (
-        (x2 - radius, y1 + radius, -90, 0),
-        (x2 - radius, y2 - radius, 0, 90),
-        (x1 + radius, y2 - radius, 90, 180),
-        (x1 + radius, y1 + radius, 180, 270),
-    )
-    for cx, cy, start, end in corners:
-        for step in range(7):
-            angle = math.radians(start + (end - start) * step / 6)
-            points.extend((sx(cx + radius * math.cos(angle)), sy(cy + radius * math.sin(angle))))
-    canvas.create_polygon(
-        points, smooth=True, splinesteps=12, fill=fill, outline=outline,
-        width=max(1, round(width * min(sx(1) - sx(0), sy(1) - sy(0)))),
-        joinstyle=tk.ROUND, tags="art",
-    )
-
-
-def _run_ui():
-    root = tk.Tk()
-    root.title("RobotInsight")
-    root.configure(bg=BACKGROUND)
-    root.attributes("-fullscreen", True)
-    root.bind("<Escape>", lambda _event: root.attributes("-fullscreen", False))
-    root.bind("<F11>", lambda _event: root.attributes("-fullscreen", True))
-
-    canvas = tk.Canvas(root, bg=BACKGROUND, bd=0, highlightthickness=0)
-    canvas.pack(fill="both", expand=True)
-    root.update()
-
-    photo_label = tk.Label(root, bg=BACKGROUND, bd=3, highlightthickness=3,
-                           highlightbackground=INK, relief="flat")
-    photo_label.place_forget()
-    photo_ref = {"image": None}
-
-    def update_capture_overlay():
-        if _capture_changed.is_set():
-            _capture_changed.clear()
-            with _capture_lock:
-                captured = _capture_image
-            if captured is None:
-                photo_label.place_forget()
-                photo_ref["image"] = None
-            else:
-                width = max(220, int(root.winfo_screenwidth() * 0.27))
-                height = max(160, int(root.winfo_screenheight() * 0.27))
-                image = captured.copy()
-                image.thumbnail((width, height), Image.Resampling.LANCZOS)
-                photo_ref["image"] = ImageTk.PhotoImage(image)
-                photo_label.configure(image=photo_ref["image"])
-                photo_label.place(relx=0.50, rely=0.50, anchor="center")
-                photo_label.lift()
-        root.after(60, update_capture_overlay)
-
-    def animate():
-        canvas.delete("art")
-        width = max(1, canvas.winfo_width())
-        height = max(1, canvas.winfo_height())
-        scale = min(width / 1000, height / 700)
-        ox = (width - 1000 * scale) / 2
-        oy = (height - 700 * scale) / 2
-        base_sx = lambda x: ox + x * scale
-        base_sy = lambda y: oy + y * scale
-        # Reserve generous side margins for the conversation panels.
-        sx = lambda x: base_sx(500 + (x - 500) * 0.72)
-        sy = lambda y: base_sy(350 + (y - 350) * 0.72)
-        sw = lambda n: max(1, round(n * scale))
-
-        with _state_lock:
-            state = _current_state
-            elapsed = time.monotonic() - _state_started
-        phase = time.monotonic()
-
-        # Gentle idle blinking; the first second of warmup opens the eyes.
-        blink = max(0.13, 1 - max(0, 1 - abs((phase % 4.7) - 4.48) / 0.22))
-        openness = 1.0
-        if state == "warmup":
-            openness = min(1.0, 0.12 + elapsed * 0.95)
-        elif state == "idle":
-            openness = blink
-        elif state == "thinking":
-            openness = 0.82 + 0.05 * math.sin(phase * 1.5)
-
-        # Soft floor shadow and two little antennae make the sketch a small robot.
-        canvas.create_oval(sx(305), sy(604), sx(695), sy(635), fill="#e8e3d4", outline="", tags="art")
-        canvas.create_line(sx(420), sy(178), sx(392), sy(119), fill=INK, width=sw(8), capstyle=tk.ROUND, tags="art")
-        canvas.create_line(sx(580), sy(178), sx(608), sy(119), fill=INK, width=sw(8), capstyle=tk.ROUND, tags="art")
-        canvas.create_oval(sx(376), sy(94), sx(408), sy(126), fill=GOLD, outline=INK, width=sw(5), tags="art")
-        canvas.create_oval(sx(592), sy(94), sx(624), sy(126), fill=TEAL, outline=INK, width=sw(5), tags="art")
-
-        # Side sensors peek out from behind the rounded face screen.
-        for x in (192, 774):
-            _rounded_rectangle(canvas, x, 330, x + 34, 420, 15, fill=TEAL,
-                               outline=INK, width=5, sx=sx, sy=sy)
-            canvas.create_oval(sx(x + 10), sy(360), sx(x + 24), sy(374),
-                               fill="#eafffc", outline="", tags="art")
-
-        # Face shell and inset screen.
-        _rounded_rectangle(canvas, 210, 158, 790, 590, 104, fill="#fffdf7",
-                           outline=INK, width=8, sx=sx, sy=sy)
-        _rounded_rectangle(canvas, 230, 178, 770, 570, 90, fill="#fffdf7",
-                           outline="#d9d4c7", width=2, sx=sx, sy=sy)
-
-        # Listening sound ripples and thinking dots are kept subtle and state-specific.
-        if state == "listening":
-            pulse = 0.5 + 0.5 * math.sin(phase * 5)
-            for side in (-1, 1):
-                cx = 500 + side * 345
-                for ring in range(3):
-                    radius = 29 + ring * 20 + pulse * 5
-                    canvas.create_arc(sx(cx - radius), sy(310 - radius), sx(cx + radius), sy(310 + radius),
-                                      start=290 if side < 0 else 70, extent=140 if side < 0 else 140,
-                                      style=tk.ARC, outline=TEAL_DARK, width=sw(5 - ring), tags="art")
-        elif state == "thinking":
-            for index, (x, y) in enumerate(((706, 248), (736, 220), (760, 188))):
-                bob = math.sin(phase * 2.4 + index) * 4
-                radius = 5 + index * 2
-                canvas.create_oval(sx(x - radius), sy(y + bob - radius), sx(x + radius), sy(y + bob + radius),
-                                   fill=GOLD, outline=INK, width=sw(2), tags="art")
-
-        # Keep slow model and web requests visible so the robot never appears frozen.
-        status_text = {
-            "thinking": "Thinking...",
-            "searching": "Searching the web...",
-            "capturing": "Taking a look...",
-        }.get(state, "")
-        if status_text:
-            canvas.create_text(sx(500), sy(650), text=status_text, fill=TEAL_DARK,
-                               font=("Segoe UI", max(12, round(22 * scale)), "bold"), tags="art")
-
-        # Question and answer stay visible beside the smaller character.
-        panel_top, panel_bottom = 145, 555
-        for x1, x2, heading, key in (
-            (18, 270, "MY QUESTION", "question"),
-            (730, 982, "AI ANSWER", "answer"),
-        ):
-            _rounded_rectangle(canvas, x1, panel_top, x2, panel_bottom, 22,
-                               fill="#fffdf7", outline="#d9d4c7", width=2,
-                               sx=base_sx, sy=base_sy)
-            canvas.create_text(base_sx(x1 + 18), base_sy(panel_top + 24), text=heading,
-                               anchor="w", fill=TEAL_DARK,
-                               font=("Segoe UI", max(10, round(15 * scale)), "bold"), tags="art")
-            with _conversation_lock:
-                panel_text = _conversation[key]
-            panel_text = panel_text.strip() or ("Waiting for your question..." if key == "question" else "Waiting for an answer...")
-            panel_text = panel_text[:360]
-            wrapped = "\n".join(textwrap.wrap(panel_text, width=23, break_long_words=True))
-            canvas.create_text(base_sx(x1 + 18), base_sy(panel_top + 52), text=wrapped,
-                               anchor="nw", width=base_sx(x2 - 16) - base_sx(x1 + 18),
-                               fill=INK, justify="left",
-                               font=("Segoe UI", max(9, round(14 * scale))), tags="art")
-
-        pupil_dx = math.sin(phase * 0.8) * 4 if state == "idle" else 0
-        pupil_dy = -14 if state == "thinking" else (1 if state == "listening" else 0)
-        if state == "capturing":
-            pupil_dx = math.sin(phase * 2) * 5
-
-        for center_x in (382, 618):
-            eye_top = 292 + (1 - openness) * 31
-            eye_bottom = 392 - (1 - openness) * 35
-            canvas.create_oval(sx(center_x - 58), sy(eye_top), sx(center_x + 58), sy(eye_bottom),
-                               fill="#ffffff", outline=INK, width=sw(6), tags="art")
-            canvas.create_oval(sx(center_x - 26 + pupil_dx), sy(321 + pupil_dy),
-                               sx(center_x + 26 + pupil_dx), sy(374 + pupil_dy),
-                               fill=TEAL_DARK, outline=INK, width=sw(4), tags="art")
-            canvas.create_oval(sx(center_x - 8 + pupil_dx), sy(332 + pupil_dy),
-                               sx(center_x + 12 + pupil_dx), sy(355 + pupil_dy),
-                               fill="#20292c", outline="", tags="art")
-            canvas.create_oval(sx(center_x - 13 + pupil_dx), sy(328 + pupil_dy),
-                               sx(center_x - 4 + pupil_dx), sy(337 + pupil_dy),
-                               fill="white", outline="", tags="art")
-            brow_y = 263 if state != "listening" else 249
-            canvas.create_line(sx(center_x - 48), sy(brow_y + 8), sx(center_x), sy(brow_y),
-                               sx(center_x + 48), sy(brow_y + 8), fill=INK, width=sw(8),
-                               smooth=True, capstyle=tk.ROUND, tags="art")
-
-        # A little nose keeps the face close to the original hand-drawn sketch.
-        canvas.create_line(sx(492), sy(406), sx(480), sy(428), sx(503), sy(431),
-                           fill=INK, width=sw(5), smooth=True, capstyle=tk.ROUND, tags="art")
-
-        # Smiling mouth; during speech it gently opens and closes like a talking character.
-        if state == "speaking":
-            mouth_open = 12 + 30 * abs(math.sin(phase * 10.5))
-            canvas.create_oval(sx(455), sy(466 - mouth_open / 2), sx(545), sy(466 + mouth_open),
-                               fill="#8c4550", outline=INK, width=sw(5), tags="art")
-            if mouth_open > 27:
-                canvas.create_arc(sx(468), sy(464), sx(532), sy(493), start=180, extent=180,
-                                  style=tk.ARC, outline="#ffd1ca", width=sw(5), tags="art")
-        elif state == "capturing":
-            canvas.create_oval(sx(480), sy(454), sx(520), sy(494), fill="#fffdf7",
-                               outline=INK, width=sw(5), tags="art")
-            flash = max(0, math.sin(phase * 7))
-            if flash > 0.8:
-                canvas.create_line(sx(500), sy(438), sx(500), sy(424), fill=GOLD, width=sw(5), tags="art")
-                canvas.create_line(sx(463), sy(449), sx(451), sy(439), fill=GOLD, width=sw(5), tags="art")
-                canvas.create_line(sx(537), sy(449), sx(549), sy(439), fill=GOLD, width=sw(5), tags="art")
+def update_answer(answer):
+    """Replace the current assistant message while tokens arrive."""
+    global _revision
+    with _lock:
+        if _conversation and _conversation[-1]["role"] == "assistant":
+            _conversation[-1]["content"] = answer
         else:
-            smile = 495 if state == "thinking" else 480
-            canvas.create_line(sx(420), sy(smile), sx(460), sy(smile + 24), sx(500), sy(smile + 30),
-                               sx(540), sy(smile + 24), sx(580), sy(smile), fill=INK,
-                               width=sw(8), smooth=True, capstyle=tk.ROUND, tags="art")
-
-        # Tiny cheek marks give the robot a warm, friendly expression.
-        if state in ("idle", "listening", "speaking"):
-            for x in (316, 684):
-                canvas.create_arc(sx(x - 18), sy(433), sx(x + 18), sy(451), start=10, extent=160,
-                                  style=tk.ARC, outline="#dc9d8c", width=sw(4), tags="art")
-
-        if state == "capturing":
-            pulse = 0.5 + 0.5 * math.sin(phase * 3)
-            radius = 310 + pulse * 8
-            canvas.create_oval(sx(500 - radius), sy(374 - radius), sx(500 + radius), sy(374 + radius),
-                               outline=TEAL, width=sw(2), dash=(sw(7), sw(8)), tags="art")
-
-        root.after(33, animate)
-
-    update_capture_overlay()
-    animate()
-    _window_ready.set()
-    root.mainloop()
+            _conversation.append({"role": "assistant", "content": answer})
+        del _conversation[:-100]
+        _revision += 1
 
 
-def start():
-    """Launch the fullscreen animated face on its own UI thread."""
-    thread = threading.Thread(target=_run_ui, daemon=True)
-    thread.start()
-    _window_ready.wait(timeout=8)
-    print("[UI] Animated interface ready")
+def set_voice_status(**fields):
+    with _lock:
+        _voice_status.update({key: value for key, value in fields.items() if key in _voice_status})
+
+
+def show_capture(pil_image):
+    global _capture_image
+    image = pil_image.copy()
+    image.thumbnail((640, 480))
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG", quality=85)
+    with _lock:
+        _capture_image = "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def clear_capture():
+    global _capture_image
+    with _lock:
+        _capture_image = None
+
+
+def voice_enabled():
+    with _lock:
+        return _voice_enabled
+
+
+def has_pending_input():
+    return not _pending.empty() or _shutdown.is_set() or devices.microphone_changed()
+
+
+def next_input():
+    try:
+        return _pending.get_nowait()
+    except queue.Empty:
+        return None
+
+
+def is_closed():
+    return _shutdown.is_set()
+
+
+def _snapshot():
+    with _lock:
+        return {"state": _current_state, "messages": list(_conversation),
+                "capture": _capture_image, "voice": _voice_enabled,
+                "revision": _revision, "preview": _preview, "voice_status": dict(_voice_status)}
+
+
+class _Handler(BaseHTTPRequestHandler):
+    def log_message(self, *_args):
+        pass
+
+    def _send(self, status, content, content_type="application/json; charset=utf-8"):
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'")
+        self.send_header("Content-Length", str(len(content)))
+        self.end_headers()
+        self.wfile.write(content)
+
+    def _json(self, status, value):
+        self._send(status, json.dumps(value, ensure_ascii=False).encode("utf-8"))
+
+    def _authorized(self):
+        return secrets.compare_digest(self.headers.get("Authorization", ""), "Bearer " + _token)
+
+    def do_GET(self):
+        path = urlsplit(self.path).path
+        if path == "/api/state":
+            if not self._authorized():
+                return self._json(403, {"error": "Open the assistant from its launcher."})
+            return self._json(200, _snapshot())
+        if path == "/api/devices":
+            if not self._authorized():
+                return self._json(403, {"error": "Open the assistant from its launcher."})
+            return self._json(200, devices.list_devices(refresh=True))
+        files = {"/": ("index.html", "text/html; charset=utf-8"),
+                 "/style.css": ("style.css", "text/css; charset=utf-8"),
+                 "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+                 "/assets/robot.png": ("assets/robot.png", "image/png")}
+        if path not in files:
+            return self._json(404, {"error": "Not found"})
+        filename, mime = files[path]
+        try:
+            self._send(200, (WEB_ROOT / filename).read_bytes(), mime)
+        except FileNotFoundError:
+            self._json(404, {"error": "Asset missing"})
+
+    def do_POST(self):
+        global _voice_enabled
+        if not self._authorized():
+            return self._json(403, {"error": "Session expired. Relaunch RobotInsight."})
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 16384:
+                return self._json(400, {"error": "Request too large or empty."})
+            data = json.loads(self.rfile.read(length))
+            if not isinstance(data, dict):
+                raise ValueError("Expected an object")
+        except (ValueError, UnicodeDecodeError):
+            return self._json(400, {"error": "Invalid request."})
+        path = urlsplit(self.path).path
+        if path == "/api/devices":
+            if get_state() not in {"idle", "error"} or not _pending.empty():
+                return self._json(409, {"error": "Wait until the current recording or response finishes, then apply devices."})
+            try:
+                result = devices.select_devices(data.get("microphone", ""), data.get("camera", ""))
+            except ValueError as error:
+                return self._json(400, {"error": str(error)})
+            except OSError:
+                return self._json(500, {"error": "Could not save device preferences. Check folder write permissions."})
+            return self._json(200, result)
+        if path == "/api/prompt":
+            prompt = data.get("text", "")
+            if not isinstance(prompt, str) or not 1 <= len(prompt.strip()) <= 4000:
+                return self._json(400, {"error": "Enter a prompt of 1–4,000 characters."})
+            item = {"type": "text", "text": prompt.strip()}
+        elif path == "/api/listen":
+            item = {"type": "voice"}
+        elif path == "/api/voice":
+            with _lock:
+                _voice_enabled = bool(data.get("enabled", True))
+            return self._json(200, {"ok": True})
+        else:
+            return self._json(404, {"error": "Not found"})
+        if _preview:
+            return self._json(409, {"error": "Design preview. Run Start_RobotInsight.bat to use the assistant."})
+        if get_state() not in {"idle", "listening"} or not _pending.empty():
+            return self._json(409, {"error": "Let me finish this response first."})
+        try:
+            _pending.put_nowait(item)
+        except queue.Full:
+            return self._json(409, {"error": "Please wait for your previous request."})
+        self._json(200, {"ok": True})
+
+
+def _open_window(url):
+    # Edge app mode uses the installed browser as a dedicated desktop window.
+    for base in (os.environ.get("ProgramFiles(x86)", ""), os.environ.get("ProgramFiles", "")):
+        edge = Path(base) / "Microsoft/Edge/Application/msedge.exe"
+        if edge.is_file():
+            subprocess.Popen([str(edge), "--app=" + url, "--window-size=1440,940"])
+            return
+    webbrowser.open(url)
+
+
+def start(open_browser=True, preview=False, port=0):
+    global _server, _preview
+    if _server is not None:
+        return _server.url
+    _preview = preview
+    _shutdown.clear()
+    _server = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
+    _server.daemon_threads = True
+    _server.url = f"http://127.0.0.1:{_server.server_port}/#{_token}"
+    threading.Thread(target=_server.serve_forever, daemon=True, name="RobotInsight UI").start()
+    if preview:
+        set_state("idle")
+        set_voice_status(wakeword="preview", message="Preview mode · start the app for voice input")
+    print(f"[UI] {'Design preview' if preview else 'Interface ready'}: {_server.url}", flush=True)
+    if open_browser:
+        _open_window(_server.url)
+    return _server.url
+
+
+def stop():
+    global _server
+    _shutdown.set()
+    if _server:
+        _server.shutdown()
+        _server.server_close()
+        _server = None
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--preview", action="store_true")
+    parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--port", type=int, default=0)
+    args = parser.parse_args()
+    start(not args.no_browser, args.preview, args.port)
+    try:
+        while not is_closed():
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop()
